@@ -12,13 +12,18 @@ import scipy.io as scio
 from PIL import Image
 
 import torch
+import graspnetAPI
 from graspnetAPI import GraspGroup
+
+from scipy.spatial.transform import Rotation as R
+from graspnetAPI.utils.utils import plot_gripper_pro_max
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
 sys.path.append(os.path.join(ROOT_DIR, 'utils'))
 
+import graspnet
 from graspnet import GraspNet, pred_decode
 from graspnet_dataset import GraspNetDataset
 from collision_detector import ModelFreeCollisionDetector
@@ -32,6 +37,36 @@ parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collis
 parser.add_argument('--voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 cfgs = parser.parse_args()
 
+import math
+ 
+# Checks if a matrix is a valid rotation matrix.
+def isRotationMatrix(R) :
+    Rt = np.transpose(R)
+    shouldBeIdentity = np.dot(Rt, R)
+    I = np.identity(3, dtype = R.dtype)
+    n = np.linalg.norm(I - shouldBeIdentity)
+    return n < 1e-6
+ 
+# Calculates rotation matrix to euler angles
+# The result is the same as MATLAB except the order
+# of the euler angles ( x and z are swapped ).
+def rotationMatrixToEulerAngles(R) :
+    ret = isRotationMatrix(R)
+    assert(ret) 
+    sy = math.sqrt(R[0,0] * R[0,0] +  R[1,0] * R[1,0])
+ 
+    singular = sy < 1e-6
+ 
+    if  not singular :
+        x = math.atan2(R[2,1] , R[2,2])
+        y = math.atan2(-R[2,0], sy)
+        z = math.atan2(R[1,0], R[0,0])
+    else :
+        x = math.atan2(-R[1,2], R[1,1])
+        y = math.atan2(-R[2,0], sy)
+        z = 0
+ 
+    return np.array([x*(180/math.pi), y*(180/math.pi), z*(180/math.pi)])
 
 def get_net():
     # Init the model
@@ -51,18 +86,21 @@ def get_net():
 def get_and_process_data(data_dir):
     # load data
     color = np.array(Image.open(os.path.join(data_dir, 'color.png')), dtype=np.float32) / 255.0
+    print(color.shape)
     depth = np.array(Image.open(os.path.join(data_dir, 'depth.png')))
+    # depth = np.load(os.path.join(data_dir, 'depth_raw_3.npy'))    
     workspace_mask = np.array(Image.open(os.path.join(data_dir, 'workspace_mask.png')))
     meta = scio.loadmat(os.path.join(data_dir, 'meta.mat'))
     intrinsic = meta['intrinsic_matrix']
     factor_depth = meta['factor_depth']
 
     # generate cloud
-    camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
+    camera = CameraInfo(depth.shape[1], depth.shape[0], intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth) #1280, 720
     cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 
     # get valid points
-    mask = (workspace_mask & (depth > 0))
+    # mask = (workspace_mask & (depth > 0))
+    mask = depth > 0
     cloud_masked = cloud[mask]
     color_masked = color[mask]
 
@@ -107,12 +145,25 @@ def collision_detection(gg, cloud):
 def vis_grasps(gg, cloud):
     gg.nms()
     gg.sort_by_score()
-    gg = gg[:50]
+    gg = gg[:1]
+    sample_gg = gg[0]
+
+    eul_angle = rotationMatrixToEulerAngles(sample_gg.rotation_matrix)
+    print(eul_angle)
+
     grippers = gg.to_open3d_geometry_list()
-    o3d.visualization.draw_geometries([cloud, *grippers])
+    print(sample_gg)
+
+    start_gripper = plot_gripper_pro_max([0,0,0], np.array([[1,0,0], [0,1,0], [0,0,1]]), 0.01, 0.01)
+    # print(start_gripper.color.shape)
+    # print(cloud)
+    o3d.visualization.draw_geometries([cloud, *grippers, start_gripper])
+    # print(grippers)
+    # o3d.visualization.draw_geometries([*grippers])
 
 def demo(data_dir):
     net = get_net()
+    print(graspnetAPI.__file__)
     end_points, cloud = get_and_process_data(data_dir)
     gg = get_grasps(net, end_points)
     if cfgs.collision_thresh > 0:
@@ -120,5 +171,5 @@ def demo(data_dir):
     vis_grasps(gg, cloud)
 
 if __name__=='__main__':
-    data_dir = 'doc/example_data'
+    data_dir = 'doc/example_data/'
     demo(data_dir)
